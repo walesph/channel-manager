@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { processAutomations } from "@/lib/automations";
+import { secureCompare } from "@/lib/secure-compare";
 
 export const runtime = "nodejs";
 
@@ -26,7 +27,7 @@ async function handle(req: Request) {
     const authHeader = req.headers.get("authorization");
     const xHeader = req.headers.get("x-cron-secret");
     const provided = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : xHeader;
-    if (provided !== secret) {
+    if (!secureCompare(provided, secret)) {
       return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
   }

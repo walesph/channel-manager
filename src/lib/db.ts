@@ -12,6 +12,13 @@ const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
  */
 const SLOW_QUERY_MS = parseInt(process.env.SLOW_QUERY_MS ?? "500", 10);
 const SLOW_QUERY_ENABLED = process.env.SLOW_QUERY_LOG !== "off";
+/**
+ * Whether to persist raw query *parameters* alongside slow queries. Params can
+ * contain guest PII (emails, names) and the log is viewable at /admin/perf, so
+ * this is OFF by default — params are stored as "[redacted]". Set
+ * `SLOW_QUERY_LOG_PARAMS=on` to capture real values in a controlled debug env.
+ */
+const SLOW_QUERY_LOG_PARAMS = process.env.SLOW_QUERY_LOG_PARAMS === "on";
 
 function makePrisma(): PrismaClient {
   const client = new PrismaClient({
@@ -32,11 +39,14 @@ function makePrisma(): PrismaClient {
       if (e.query.includes('"SlowQueryLog"')) return;
       inLog = true;
       const truncQuery = e.query.length > 240 ? `${e.query.slice(0, 240)}…` : e.query;
-      const truncParams = e.params.length > 240 ? `${e.params.slice(0, 240)}…` : e.params;
+      // Params may contain guest PII — redact unless explicitly opted in.
+      const safeParams = SLOW_QUERY_LOG_PARAMS
+        ? e.params.length > 240 ? `${e.params.slice(0, 240)}…` : e.params
+        : "[redacted]";
       // Fire-and-forget so we never block the request path.
       void client.slowQueryLog
         .create({
-          data: { query: truncQuery, params: truncParams, durationMs: Math.round(e.duration) },
+          data: { query: truncQuery, params: safeParams, durationMs: Math.round(e.duration) },
         })
         .catch(() => undefined)
         .finally(() => { inLog = false; });

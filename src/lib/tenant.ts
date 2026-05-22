@@ -72,6 +72,25 @@ export function isClerkEnabled(): boolean {
 }
 
 /**
+ * Whether the current request carries an authenticated Clerk session.
+ *
+ * Used to distinguish a logged-in *user* (whose tenant is fixed to their
+ * session) from a sessionless *server-to-server* caller (e.g. an inbound
+ * OTA webhook that legitimately specifies which hotel to write to). Returns
+ * false when Clerk is disabled or outside a request scope.
+ */
+export async function hasActiveSession(): Promise<boolean> {
+  if (!clerkEnabled) return false;
+  try {
+    const { auth } = await import("@clerk/nextjs/server");
+    const { userId } = await auth();
+    return !!userId;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Throws if the provided resource hotelId does not match the current tenant.
  * Use inside mutation actions after fetching the resource.
  */

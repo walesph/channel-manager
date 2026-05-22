@@ -3,6 +3,7 @@ import { BookingEventType, BookingStatus, ChannelType } from "@prisma/client";
 import { createBooking } from "@/lib/actions";
 import { prisma } from "@/lib/db";
 import { logWebhook } from "@/lib/webhook-log";
+import { secureCompare } from "@/lib/secure-compare";
 
 export const runtime = "nodejs";
 
@@ -108,11 +109,19 @@ export async function POST(req: Request) {
     return res;
   };
 
-  // Auth: shared secret (rotate via env). Skip when env is unset (dev mode).
+  // Auth: shared secret (rotate via env). Required in production — an unset
+  // secret there would leave booking ingestion wide open, so we refuse. When
+  // unset in dev the check is skipped for local convenience.
   const expectedSecret = process.env.WEBHOOK_SECRET;
-  if (expectedSecret) {
+  if (!expectedSecret) {
+    if (process.env.NODE_ENV === "production") {
+      logStatus = "bad_request";
+      responseBody = "WEBHOOK_SECRET not configured";
+      return finish(bad(503, responseBody));
+    }
+  } else {
     const provided = req.headers.get("x-webhook-secret");
-    if (provided !== expectedSecret) {
+    if (!secureCompare(provided, expectedSecret)) {
       logStatus = "invalid_signature";
       responseBody = "invalid webhook secret";
       return finish(bad(401, responseBody));

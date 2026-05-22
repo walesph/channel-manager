@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "./db";
 import { headers } from "next/headers";
-import { assertHotelOwnership, currentHotelId } from "./tenant";
+import { assertHotelOwnership, currentHotelId, hasActiveSession } from "./tenant";
 import { getAutomationTickDetail, getRecentActivity, getWebhookLogDetail, searchCommands, type ActivityItem, type AutomationTickDetail, type CommandItem, type WebhookLogDetail } from "./queries";
 import { getStripe, stripeEnabled } from "./stripe";
 import {
@@ -438,7 +438,20 @@ export async function createBooking(input: CreateBookingInput): Promise<CreateBo
     const roomType = await prisma.roomType.findUnique({ where: { id: input.roomTypeId } });
     if (!roomType) return { ok: false, error: "room type not found" };
 
-    const expectedHotelId = input.hotelId ?? (await currentHotelId());
+    // Authoritative tenant = the caller's session hotel. A client-supplied
+    // `input.hotelId` is only honored for sessionless server-to-server callers
+    // (e.g. the Booking.com webhook). A logged-in user may NOT target another
+    // hotel by passing a foreign hotelId — this is a public "use server"
+    // action, so its arguments are attacker-controllable.
+    const sessionHotelId = await currentHotelId();
+    let expectedHotelId = sessionHotelId;
+    if (input.hotelId && input.hotelId !== sessionHotelId) {
+      if (await hasActiveSession()) {
+        return { ok: false, error: "forbidden: cannot create a booking for another hotel" };
+      }
+      // No session → trusted ingestion path; honor the explicit hotelId.
+      expectedHotelId = input.hotelId;
+    }
     if (roomType.hotelId !== expectedHotelId) {
       return { ok: false, error: "room type does not belong to this hotel" };
     }
