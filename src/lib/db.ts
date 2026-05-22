@@ -58,3 +58,29 @@ function makePrisma(): PrismaClient {
 export const prisma = globalForPrisma.prisma ?? makePrisma();
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+
+/**
+ * Runs `fn` inside a transaction with the Postgres RLS tenant GUC
+ * (`app.current_hotel_id`) bound to `hotelId`. Inside the callback EVERY query
+ * is restricted to that hotel by the row-level-security policies — a
+ * defense-in-depth net beneath the app's own `where: { hotelId }` filters, so
+ * a query that forgets to scope still cannot read or write another tenant's
+ * rows.
+ *
+ * Use this for session-originated access where the tenant is known. Trusted
+ * server-to-server paths (webhooks, cron, provisioning, seed) intentionally
+ * keep using the global `prisma` client with NO tenant context, where the
+ * policies are permissive.
+ *
+ * The GUC is set with `is_local = true`, so it is scoped to this transaction
+ * and never leaks onto the pooled connection afterwards.
+ */
+export async function withTenant<T>(
+  hotelId: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.current_hotel_id', ${hotelId}, true)`;
+    return fn(tx);
+  });
+}
