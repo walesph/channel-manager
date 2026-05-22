@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Stayboard — Channel Manager</title>
+<link rel="stylesheet" href="styles/tokens.css"/>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  html, body, #root { height: 100%; }
+  body { background: var(--bg-1); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="components/icons.jsx"></script>
+<script type="text/babel" src="components/i18n.jsx"></script>
+<script type="text/babel" src="components/sidebar.jsx"></script>
+<script type="text/babel" src="components/topbar.jsx"></script>
+<script type="text/babel" src="components/dashboard.jsx"></script>
+<script type="text/babel" src="components/calendar.jsx"></script>
+<script type="text/babel" src="components/bookings.jsx"></script>
+<script type="text/babel" src="components/messages.jsx"></script>
+<script type="text/babel" src="components/channels.jsx"></script>
+<script type="text/babel" src="components/rooms-revenue.jsx"></script>
+<script type="text/babel" src="components/mobile.jsx"></script>
+
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect } = React;
+const { DesignCanvas, DCSection, DCArtboard } = window;
+const { TweaksPanel, useTweaks, TweakSection, TweakRadio, TweakToggle, TweakSlider } = window;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "lang": "ko",
+  "dark": false,
+  "density": "normal",
+  "accent": "indigo"
+}/*EDITMODE-END*/;
+
+const ACCENTS = {
+  indigo: { acc: '#4f46e5', soft: '#eef2ff', bd: '#c7d0fe', hover: '#4338ca', text: '#3730a3' },
+  emerald:{ acc: '#059669', soft: '#ecfdf5', bd: '#a7f3d0', hover: '#047857', text: '#065f46' },
+  rose:   { acc: '#e11d48', soft: '#fff1f2', bd: '#fecdd3', hover: '#be123c', text: '#9f1239' },
+  slate:  { acc: '#1f2937', soft: '#f1f5f9', bd: '#cbd5e1', hover: '#0f172a', text: '#0f172a' },
+};
+
+// Frame wraps each artboard with sidebar + topbar + a page
+const Frame = ({ page, lang, dark, breadcrumb, title, sub, actions, showSync = true, w = 1440, h = 900 }) => {
+  const Page = page;
+  return (
+    <div className={`app ${dark ? 'theme-dark' : ''}`} style={{width: w, height: h, display: 'flex', background: 'var(--bg)'}}>
+      <Sidebar active={page.activeKey || 'dashboard'} lang={lang}/>
+      <main style={{flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden'}}>
+        <Topbar
+          title={title}
+          sub={sub}
+          breadcrumb={breadcrumb}
+          actions={actions}
+          lang={lang}
+          dark={dark}
+          showSync={showSync}
+        />
+        <div style={{flex: 1, overflow: 'auto', minHeight: 0}}>
+          <Page lang={lang}/>
+        </div>
+      </main>
+    </div>
+  );
+};
+
+// Wrap pages with active key tags
+const DashboardP = (p) => <Dashboard {...p}/>;       DashboardP.activeKey = 'dashboard';
+const CalendarP  = (p) => <Calendar {...p}/>;        CalendarP.activeKey  = 'calendar';
+const BookingsP  = (p) => <Bookings {...p}/>;        BookingsP.activeKey  = 'bookings';
+const MessagesP  = (p) => <Messages {...p}/>;        MessagesP.activeKey  = 'messages';
+const ChannelsP  = (p) => <Channels {...p}/>;        ChannelsP.activeKey  = 'channels';
+const RoomsP     = (p) => <Rooms {...p}/>;           RoomsP.activeKey     = 'rooms';
+const RevenueP   = (p) => <Revenue {...p}/>;         RevenueP.activeKey   = 'revenue';
+
+const App = () => {
+  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const lang = tweaks.lang;
+  const dark = tweaks.dark;
+  const t = STR[lang];
+
+  // Apply accent + density to root
+  useEffect(() => {
+    const a = ACCENTS[tweaks.accent] || ACCENTS.indigo;
+    const r = document.documentElement.style;
+    r.setProperty('--acc', a.acc);
+    r.setProperty('--acc-soft', a.soft);
+    r.setProperty('--acc-bd', a.bd);
+    r.setProperty('--acc-hover', a.hover);
+    r.setProperty('--acc-text', a.text);
+  }, [tweaks.accent]);
+
+  useEffect(() => {
+    document.body.classList.toggle('theme-dark', dark);
+    document.body.classList.toggle('dense', tweaks.density === 'dense');
+    document.body.classList.toggle('dense-loose', tweaks.density === 'loose');
+  }, [dark, tweaks.density]);
+
+  const cycleLang = () => setTweak('lang', lang === 'ko' ? 'en' : 'ko');
+  const cycleDark = () => setTweak('dark', !dark);
+
+  // Common topbar action button group for the dashboard
+  const dashActions = (
+    <>
+      <button className="btn sm ghost"><I.cal size={12}/> {lang === 'ko' ? '오늘' : 'Today'}</button>
+      <button className="btn sm primary"><I.plus size={12}/> {lang === 'ko' ? '신규 예약' : 'New booking'}</button>
+    </>
+  );
+
+  return (
+    <>
+      <DesignCanvas
+        title="Stayboard — Channel Manager"
+        subtitle={lang === 'ko' ? '중소형 호텔용 OTA 통합 관리 시스템' : 'OTA-integrated management for boutique hotels'}
+        defaultZoom={0.5}
+      >
+        <DCSection id="overview" title={lang === 'ko' ? '00 · 메인 화면' : '00 · Main screens'}>
+          <DCArtboard id="dashboard" label={lang === 'ko' ? '대시보드' : 'Dashboard'} width={1440} height={1020}>
+            <Frame
+              page={DashboardP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.dashboard]}
+              title={lang === 'ko' ? '대시보드' : 'Dashboard'}
+              sub={lang === 'ko' ? '2026년 1월 13일 · 오늘 운영 현황' : 'Jan 13, 2026 · Today at a glance'}
+              actions={dashActions}
+              w={1440} h={1020}
+            />
+          </DCArtboard>
+
+          <DCArtboard id="calendar" label={lang === 'ko' ? '캘린더 (재고 + 가격)' : 'Calendar (inventory + rates)'} width={1600} height={920}>
+            <Frame
+              page={CalendarP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.calendar]}
+              title={lang === 'ko' ? '캘린더' : 'Calendar'}
+              sub={lang === 'ko' ? '재고 · 가격 · 채널별 차등' : 'Inventory · rates · per-channel'}
+              actions={
+                <>
+                  <button className="btn sm ghost"><I.sparkle size={12}/> AI</button>
+                  <button className="btn sm primary"><I.edit size={12}/> {t.bulk}</button>
+                </>
+              }
+              w={1600} h={920}
+            />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="ops" title={lang === 'ko' ? '01 · 예약 & 메시지' : '01 · Bookings & Messages'}>
+          <DCArtboard id="bookings" label={lang === 'ko' ? '예약 인박스 + 상세' : 'Booking inbox + detail'} width={1600} height={960}>
+            <Frame
+              page={BookingsP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.bookings]}
+              title={lang === 'ko' ? '예약' : 'Bookings'}
+              sub="142 confirmed · 3 pending · 2 cancelled"
+              actions={<button className="btn sm primary"><I.plus size={12}/> {lang === 'ko' ? '직접 예약' : 'New booking'}</button>}
+              w={1600} h={960}
+            />
+          </DCArtboard>
+
+          <DCArtboard id="messages" label={lang === 'ko' ? '메시지 통합 인박스' : 'Unified messages'} width={1600} height={920}>
+            <Frame
+              page={MessagesP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.messages]}
+              title={lang === 'ko' ? '메시지' : 'Messages'}
+              sub={lang === 'ko' ? '6개 응답 대기 · 모든 채널' : '6 pending replies · all channels'}
+              actions={<button className="btn sm ghost"><I.sparkle size={12}/> AI {lang === 'ko' ? '답장' : 'replies'}</button>}
+              w={1600} h={920}
+            />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="setup" title={lang === 'ko' ? '02 · 채널 & 객실 설정' : '02 · Channels & Rooms'}>
+          <DCArtboard id="channels" label={lang === 'ko' ? '채널 연동' : 'Channels & integrations'} width={1440} height={1080}>
+            <Frame
+              page={ChannelsP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.channels]}
+              title={lang === 'ko' ? '채널' : 'Channels'}
+              sub={lang === 'ko' ? '6개 연결됨 · 1 지연' : '6 connected · 1 delayed'}
+              actions={<button className="btn sm primary"><I.plus size={12}/> {lang === 'ko' ? '채널 추가' : 'Add channel'}</button>}
+              w={1440} h={1080}
+            />
+          </DCArtboard>
+
+          <DCArtboard id="rooms" label={lang === 'ko' ? '객실 · 요금제' : 'Rooms & rates'} width={1440} height={920}>
+            <Frame
+              page={RoomsP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.rooms]}
+              title={lang === 'ko' ? '객실 · 요금제' : 'Rooms & Rates'}
+              sub="5 types · 8 rate plans · 3 promotions"
+              actions={null}
+              showSync={false}
+              w={1440} h={920}
+            />
+          </DCArtboard>
+
+          <DCArtboard id="revenue" label={lang === 'ko' ? '수익 분석' : 'Revenue analytics'} width={1440} height={1020}>
+            <Frame
+              page={RevenueP}
+              lang={lang} dark={dark}
+              breadcrumb={[t.workspace, t.nav.revenue]}
+              title={lang === 'ko' ? '수익 분석' : 'Revenue'}
+              sub="₩57.5M MTD · +12.4% YoY"
+              actions={null}
+              showSync={false}
+              w={1440} h={1020}
+            />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="mobile" title={lang === 'ko' ? '03 · 모바일' : '03 · Mobile'}>
+          <DCArtboard id="m-dash" label={lang === 'ko' ? '모바일 · 대시보드' : 'Mobile · Dashboard'} width={440} height={920}>
+            <div style={{padding: 20, display: 'flex', justifyContent: 'center'}}>
+              <IOSDevice width={400} height={870} dark={dark}>
+                <div className={dark ? 'theme-dark' : ''} style={{height: '100%', position: 'relative'}}>
+                  <MobileDash lang={lang}/>
+                </div>
+              </IOSDevice>
+            </div>
+          </DCArtboard>
+
+          <DCArtboard id="m-cal" label={lang === 'ko' ? '모바일 · 캘린더' : 'Mobile · Calendar'} width={440} height={920}>
+            <div style={{padding: 20, display: 'flex', justifyContent: 'center'}}>
+              <IOSDevice width={400} height={870} dark={dark}>
+                <div className={dark ? 'theme-dark' : ''} style={{height: '100%', position: 'relative', display: 'flex', flexDirection: 'column'}}>
+                  <MobileCal lang={lang}/>
+                </div>
+              </IOSDevice>
+            </div>
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection title={lang === 'ko' ? '언어 & 테마' : 'Language & theme'}>
+          <TweakRadio
+            label={lang === 'ko' ? '언어' : 'Language'}
+            value={tweaks.lang}
+            onChange={(v) => setTweak('lang', v)}
+            options={[{value:'ko', label:'한국어'},{value:'en', label:'English'}]}
+          />
+          <TweakRadio
+            label={lang === 'ko' ? '테마' : 'Theme'}
+            value={tweaks.dark ? 'dark' : 'light'}
+            onChange={(v) => setTweak('dark', v === 'dark')}
+            options={[{value:'light', label: lang === 'ko' ? '라이트' : 'Light'},{value:'dark', label: lang === 'ko' ? '다크' : 'Dark'}]}
+          />
+          <TweakRadio
+            label={lang === 'ko' ? '강조 색상' : 'Accent'}
+            value={tweaks.accent}
+            onChange={(v) => setTweak('accent', v)}
+            options={[
+              {value:'indigo', label:'Indigo'},
+              {value:'emerald',label:'Emerald'},
+              {value:'rose',  label:'Rose'},
+              {value:'slate', label:'Slate'},
+            ]}
+          />
+        </TweakSection>
+        <TweakSection title={lang === 'ko' ? '밀도' : 'Density'}>
+          <TweakRadio
+            label={lang === 'ko' ? '행 밀도' : 'Row density'}
+            value={tweaks.density}
+            onChange={(v) => setTweak('density', v)}
+            options={[
+              {value:'dense',  label: lang === 'ko' ? '조밀' : 'Dense'},
+              {value:'normal', label: lang === 'ko' ? '보통' : 'Normal'},
+              {value:'loose',  label: lang === 'ko' ? '여유' : 'Loose'},
+            ]}
+          />
+        </TweakSection>
+      </TweaksPanel>
+    </>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "Stayboard — Channel Manager",
+  "short_name": "Stayboard",
+  "description": "Hotel channel manager + PMS for Korean OTAs and global channels.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4f46e5",
+  "lang": "ko",
+  "scope": "/",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

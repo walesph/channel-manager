@@ -1,0 +1,714 @@
+// Stayboard — Phase 1 schema
+// Hotel / RoomType / Channel / Inventory / Rate / Booking / Guest
+// Multi-tenant by Hotel; channel mappings model per-hotel OTA connections.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ChannelType {
+  airbnb
+  booking
+  agoda
+  trip
+  direct
+  fb
+  yanolja
+  naver
+}
+
+enum ChannelStatus {
+  synced
+  syncing
+  delayed
+  error
+}
+
+enum BookingStatus {
+  confirmed
+  in_house
+  checked_out
+  cancelled
+}
+
+enum PaymentStatus {
+  paid
+  pending
+  failed
+  refunded
+}
+
+enum BookingRequestType {
+  bed
+  checkin
+  dietary
+  note
+}
+
+enum BookingEventType {
+  created
+  payment_captured
+  payment_failed
+  payment_refunded
+  confirmation_sent
+  message_received
+  checked_in
+  checked_out
+  cancelled
+  /// Guest self-checked-in via the public kiosk URL.
+  self_check_in
+}
+
+enum SyncOp {
+  push_inventory
+  push_rates
+  pull_bookings
+  rate_mismatch
+}
+
+enum SyncResult {
+  success
+  in_progress
+  warn
+  error
+}
+
+enum MessageSender {
+  guest
+  host
+  system
+}
+
+enum MiddlewareType {
+  hostaway
+  siteminder
+  rategain
+  ezpms
+}
+
+enum MiddlewareStatus {
+  connected
+  disconnected
+  error
+}
+
+enum SubscriptionPlan {
+  starter
+  pro
+  enterprise
+}
+
+enum SubscriptionStatus {
+  /// Brand-new hotel, in 14-day free trial (default).
+  trial
+  /// Active paid subscription.
+  active
+  /// Trial expired but no payment method — features are gated.
+  past_due
+  /// Cancelled by user or after dunning failures.
+  cancelled
+}
+
+model Hotel {
+  id        String   @id @default(cuid())
+  name      String
+  timezone  String   @default("Asia/Seoul")
+  currency  String   @default("KRW")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Optional logo URL (set via /settings, references an UploadedFile.url).
+  logoUrl   String?
+  /// Owner-facing read-only iCal feed token. Distinct from per-channel
+  /// `Channel.icalExportToken` which is meant for channel sync. This one
+  /// aggregates ALL channels into a single feed for Google Cal etc.
+  ownerICalToken String? @unique
+
+  /// Stayboard SaaS subscription state. `null` plan = no active sub yet
+  /// (trial offered). `subscriptionStatus` mirrors the Stripe subscription
+  /// lifecycle so the UI can gate features. `trialEndsAt` is set on first
+  /// signup so users get the trial regardless of when they configure billing.
+  plan                 SubscriptionPlan?
+  subscriptionStatus   SubscriptionStatus @default(trial)
+  trialEndsAt          DateTime?
+  /// Stripe customer + subscription ids (null until checkout completes).
+  stripeCustomerId     String? @unique
+  stripeSubscriptionId String? @unique
+  /// Snapshot of when the current paid period ends. Synced from Stripe via webhook.
+  currentPeriodEndsAt  DateTime?
+  /// First-run onboarding completion timestamp. When null, the AppShell
+  /// middleware redirects to /onboarding so new operators land on a guided
+  /// walkthrough instead of an empty dashboard.
+  onboardingCompletedAt DateTime?
+
+  roomTypes      RoomType[]
+  channels       Channel[]
+  bookings       Booking[]
+  guests         Guest[]
+  threads        Thread[]
+  savedReplies   SavedReply[]
+  middlewares    Middleware[]
+  emailTemplates    EmailTemplate[]
+  uploads           UploadedFile[]
+  pushSubscriptions PushSubscription[]
+  integrations      OutboundIntegration[]
+  savedFilters      SavedFilter[]
+}
+
+/// Web Push subscription endpoints. One row per browser (each device registers
+/// its own keys when the user accepts the prompt). The cron + booking-create
+/// path use these to push real-time notifications to hotel staff.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  hotelId   String
+  hotel     Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  /// User identifier — Clerk user id when available, else "anon-<random>"
+  /// for unauthenticated dev sessions.
+  userKey   String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  /// User-Agent at subscription time, for the /settings/team listing.
+  userAgent String?
+  createdAt DateTime @default(now())
+  /// Bumped each time we see a 410 from the push service so we can prune dead subs.
+  failureCount Int   @default(0)
+
+  @@index([hotelId])
+  @@index([userKey])
+}
+
+model RoomType {
+  id         String   @id @default(cuid())
+  hotelId    String
+  hotel      Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name       String
+  capacity   Int      @default(2)
+  baseRate   Int
+  bedType    String?
+  sizeSqm    Int?
+  amenities  String[] @default([])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  rooms      Room[]
+  ratePlans  RatePlan[]
+  inventory  Inventory[]
+  rates      Rate[]
+  bookings   Booking[]
+  channelMap ChannelMap[]
+
+  @@index([hotelId])
+}
+
+/// Housekeeping state of a physical room. `vacant_clean` = ready for next
+/// arrival; `vacant_dirty` = needs cleaning; `occupied` = guest in-house;
+/// `out_of_order` = blocked (maintenance / damage). UI computes "occupied"
+/// from active in_house bookings — the persisted state covers everything else.
+enum RoomState {
+  vacant_clean
+  vacant_dirty
+  occupied
+  out_of_order
+}
+
+model Room {
+  id         String    @id @default(cuid())
+  roomTypeId String
+  roomType   RoomType  @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  number     String
+  /// Persisted housekeeping state. Defaults to clean.
+  state      RoomState @default(vacant_clean)
+  /// Free-form note from housekeeping (e.g. "shower head replaced").
+  stateNote  String?
+  /// Who flipped the state most recently (Clerk user id or "anon-..." in dev).
+  stateBy    String?
+  stateAt    DateTime  @default(now())
+
+  bookings Booking[]
+
+  @@unique([roomTypeId, number])
+  @@index([roomTypeId, state])
+}
+
+model Channel {
+  id          String        @id @default(cuid())
+  hotelId     String
+  hotel       Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  type        ChannelType
+  status      ChannelStatus @default(synced)
+  lastSyncAt  DateTime?
+  credentials Json?
+  /** Optional iCal feed URL for inbound booking ingestion (Airbnb-style). */
+  icalUrl     String?
+  /** When set, /api/ical/{token}.ics returns this channel's bookings as an .ics feed. */
+  icalExportToken String? @unique
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  mappings ChannelMap[]
+  rates    Rate[]
+  bookings Booking[]
+  syncLogs SyncLog[]
+  threads  Thread[]
+
+  @@unique([hotelId, type])
+}
+
+model ChannelMap {
+  id           String   @id @default(cuid())
+  channelId    String
+  channel      Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  roomTypeId   String
+  roomType     RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  externalId   String
+  ratePlanMap  Json?
+
+  @@unique([channelId, roomTypeId])
+}
+
+model RatePlan {
+  id         String   @id @default(cuid())
+  roomTypeId String
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  name       String
+  refundable Boolean  @default(true)
+  modifier   Float    @default(1.0)
+
+  rates Rate[]
+}
+
+model Inventory {
+  roomTypeId String
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  date       DateTime @db.Date
+  available  Int
+  closed     Boolean  @default(false)
+  minStay    Int      @default(1)
+
+  @@id([roomTypeId, date])
+}
+
+model Rate {
+  id         String   @id @default(cuid())
+  roomTypeId String
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  ratePlanId String
+  ratePlan   RatePlan @relation(fields: [ratePlanId], references: [id], onDelete: Cascade)
+  channelId  String?
+  channel    Channel? @relation(fields: [channelId], references: [id])
+  date       DateTime @db.Date
+  amount     Int
+
+  @@unique([roomTypeId, ratePlanId, channelId, date])
+}
+
+model Guest {
+  id        String   @id @default(cuid())
+  hotelId   String
+  hotel     Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name      String
+  email     String?
+  phone     String?
+  country   String?
+  language  String?
+  /// Free-form private notes (host-only, not surfaced to the guest).
+  notes     String?
+  /// Operator tags, e.g. ["VIP", "allergy"]. UI renders as pills.
+  tags      String[] @default([])
+  /// Soft-delete request timestamp for GDPR. After 30-day grace the
+  /// `processAutomations` cron hard-deletes the row + all dependents.
+  /// `null` means active. Set via /settings/privacy.
+  deletionRequestedAt DateTime?
+  createdAt DateTime @default(now())
+
+  bookings Booking[]
+  threads  Thread[]
+
+  @@index([hotelId])
+}
+
+/// Public single-use token for self-check-in. Generated when staff hits
+/// "Send check-in link" (or auto by the 24h reminder cron). The token is
+/// short, hard-coupled to one booking, and expires 7 days after creation
+/// or at booking.checkOut, whichever is later.
+model CheckinToken {
+  id          String    @id @default(cuid())
+  bookingId   String    @unique
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  token       String    @unique
+  /// URL of the ID photo the guest uploaded (UploadedFile.url).
+  idPhotoUrl  String?
+  /// Self-reported arrival time, HH:MM 24h KST.
+  arrivalEta  String?
+  /// When the guest finished the kiosk flow.
+  completedAt DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  @@index([bookingId])
+}
+
+model Booking {
+  id          String        @id @default(cuid())
+  hotelId     String
+  hotel       Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  channelId   String?
+  channel     Channel?      @relation(fields: [channelId], references: [id])
+  externalRef String?
+  guestId     String
+  guest       Guest         @relation(fields: [guestId], references: [id])
+  roomTypeId  String
+  roomType    RoomType      @relation(fields: [roomTypeId], references: [id])
+  roomId      String?
+  room        Room?         @relation(fields: [roomId], references: [id])
+  checkIn     DateTime      @db.Date
+  checkOut    DateTime      @db.Date
+  status      BookingStatus @default(confirmed)
+  payment     PaymentStatus @default(pending)
+  total       Int
+  notes       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  requests     BookingRequest[]
+  events       BookingEvent[]
+  checkinToken CheckinToken?
+
+  @@index([hotelId, checkIn])
+  @@index([channelId, externalRef])
+}
+
+model BookingRequest {
+  id        String             @id @default(cuid())
+  bookingId String
+  booking   Booking            @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  type      BookingRequestType
+  label     String
+
+  @@index([bookingId])
+}
+
+model BookingEvent {
+  id         String           @id @default(cuid())
+  bookingId  String
+  booking    Booking          @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  type       BookingEventType
+  occurredAt DateTime
+  body       String?
+
+  @@index([bookingId, occurredAt])
+}
+
+model SyncLog {
+  id         String     @id @default(cuid())
+  channelId  String
+  channel    Channel    @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  op         SyncOp
+  target     String
+  result     SyncResult
+  durationMs Int?
+  note       String?
+  occurredAt DateTime   @default(now())
+
+  @@index([occurredAt])
+}
+
+model Thread {
+  id            String   @id @default(cuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  guestId       String
+  guest         Guest    @relation(fields: [guestId], references: [id])
+  channelId     String?
+  channel       Channel? @relation(fields: [channelId], references: [id])
+  lastMessageAt DateTime
+  unreadCount   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  messages Message[]
+
+  @@unique([hotelId, guestId, channelId])
+  @@index([hotelId, lastMessageAt])
+}
+
+model Message {
+  id        String        @id @default(cuid())
+  threadId  String
+  thread    Thread        @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender    MessageSender
+  body      String
+  createdAt DateTime      @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+model SavedReply {
+  id      String @id @default(cuid())
+  hotelId String
+  hotel   Hotel  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  label   String
+  body    String
+
+  @@index([hotelId])
+}
+
+model Middleware {
+  id          String           @id @default(cuid())
+  hotelId     String
+  hotel       Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  type        MiddlewareType
+  status      MiddlewareStatus @default(disconnected)
+  /** Display label / "PMS property id" the middleware uses on its side. */
+  propertyId  String?
+  credentials Json?
+  lastSyncAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@unique([hotelId, type])
+}
+
+/// Tracks booking-driven inventory decrements that fanned out across all
+/// other configured OTAs for the same date range. We snapshot the listings
+/// we touched + which channel triggered the lock so we can audit + reverse
+/// on cancellation. One row per (booking, listing-day-tuple).
+model InventoryLock {
+  id            String    @id @default(cuid())
+  bookingId     String
+  /// Hotel scope — same as the booking's hotelId. De-normalized for fast queries.
+  hotelId       String
+  /// External listing ID (Hostaway listingId / OTA property id). One row per listing.
+  externalId    String
+  /// Channel that received this decrement (target).
+  targetChannel ChannelType
+  /// Channel the booking originated on (source) — for audit "who caused it".
+  sourceChannel ChannelType
+  /// First/last night affected (inclusive). UTC start-of-day.
+  startDate     DateTime
+  endDate       DateTime
+  /// Inventory units locked (usually 1 per booking, > 1 for multi-room reservations).
+  units         Int       @default(1)
+  /// When the lock was reversed (cancel / refund). null = active.
+  releasedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([bookingId])
+  @@index([hotelId, startDate])
+}
+
+/// Slow-query log. The Prisma client emits a `query` event per DB call;
+/// our instrumentation hook persists the slow ones (>SLOW_QUERY_MS,
+/// default 500ms) to this table. Cross-tenant — surfaces to /admin/perf
+/// for backend operators.
+model SlowQueryLog {
+  id        String   @id @default(cuid())
+  occurredAt DateTime @default(now())
+  /// Truncated SQL — first 240 chars only.
+  query     String
+  /// Truncated params (JSON-string).
+  params    String?
+  durationMs Int
+  /// "GET /api/bookings", "POST /api/cron/run", etc — best-effort from request scope.
+  endpoint  String?
+
+  @@index([occurredAt])
+}
+
+/// User-saved filter combinations for the Bookings / Messages pages.
+/// Stored per (hotel, scope). Operators pin frequently-used queries —
+/// "Today's arrivals", "VIP only", "Awaiting reply" — and reach them with
+/// one click from the sidebar.
+///
+/// `params` is a JSON blob with the same shape as the page's URL query
+/// (e.g. `{q, channel, status, from, to}` for bookings). Renderer slots
+/// it directly into the URL via `URLSearchParams`.
+enum SavedFilterScope {
+  bookings
+  messages
+}
+
+model SavedFilter {
+  id        String           @id @default(cuid())
+  hotelId   String
+  hotel     Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  scope     SavedFilterScope
+  /// Display name shown in the sidebar — must be unique per (hotel, scope).
+  label     String
+  /// Optional emoji prefix shown in the sidebar (kept short — 1-2 chars).
+  icon      String?
+  /// JSON map of URL search params, e.g. `{"channel":"airbnb","status":"confirmed"}`.
+  params    Json
+  /// Sort order in the sidebar (lower = earlier).
+  sortIndex Int              @default(0)
+  /// Stats — bumped each time the filter is opened so we can sort by usage later.
+  hitCount  Int              @default(0)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([hotelId, scope, label])
+  @@index([hotelId, scope])
+}
+
+/// Outbound integration to a 3rd-party chat (Slack / Discord) — pushes a
+/// notification when the configured `events` happen. Webhook URL is the
+/// only secret; we don't fan-out per channel/user (users can route in Slack
+/// itself). One row per (hotel, provider, label) so a hotel can have e.g.
+/// "#bookings" + "#alerts" Slack feeds.
+enum IntegrationProvider {
+  slack
+  discord
+}
+
+enum IntegrationEvent {
+  booking_created
+  booking_cancelled
+  payment_failed
+  warning_digest
+}
+
+model OutboundIntegration {
+  id          String              @id @default(cuid())
+  hotelId     String
+  hotel       Hotel               @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  provider    IntegrationProvider
+  /// Display label shown in /settings/integrations, e.g. "#bookings".
+  label       String
+  webhookUrl  String
+  /// Subscribed event kinds. Empty = subscribed to nothing (effectively paused).
+  events      IntegrationEvent[]
+  enabled     Boolean             @default(true)
+  /// Stats for the UI.
+  successCount Int                @default(0)
+  failureCount Int                @default(0)
+  lastFiredAt DateTime?
+  createdAt   DateTime            @default(now())
+
+  @@index([hotelId])
+}
+
+/// Tracks files uploaded by hotel staff (logos, room photos). The actual
+/// bytes live in S3/R2 (or, in dev, a local data: URL fallback). We keep
+/// only the public URL + content metadata for audit and quota tracking.
+enum UploadKind {
+  hotel_logo
+  room_photo
+  other
+}
+
+model UploadedFile {
+  id          String     @id @default(cuid())
+  hotelId     String
+  hotel       Hotel      @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  kind        UploadKind
+  /// Original filename from the user's machine.
+  filename    String
+  /// MIME type, e.g. "image/png".
+  contentType String
+  /// Bytes (for quota/UI display).
+  sizeBytes   Int
+  /// Publicly resolvable URL — S3/R2 in prod, data: URL in dev fallback.
+  url         String
+  /// Optional natural-key for the entity that owns this upload (e.g. roomTypeId).
+  ownerRefId  String?
+  /// Display order within an owner. Lower = earlier. Defaults to 0; reorder
+  /// actions update this in bulk.
+  sortIndex   Int        @default(0)
+  createdAt   DateTime   @default(now())
+
+  @@index([hotelId, kind])
+  @@index([ownerRefId, sortIndex])
+}
+
+/// Inbound webhook activity log. Lets /settings/webhooks show provider history
+/// and supports manual replay. Stores the raw payload + headers so retries can
+/// re-execute the verification + handler path.
+enum WebhookProvider {
+  clerk
+  stripe
+  booking_com
+  hostaway
+}
+
+enum WebhookStatus {
+  ok
+  invalid_signature
+  bad_request
+  handler_error
+}
+
+model WebhookLog {
+  id          String          @id @default(cuid())
+  provider    WebhookProvider
+  /// Provider-specific event type (e.g. "user.created", "booking.created").
+  eventType   String?
+  status      WebhookStatus
+  /// HTTP status returned to the provider.
+  httpStatus  Int
+  /// Response or error body, truncated server-side to 4KB.
+  responseBody String?
+  /// Original headers as JSON (for replay verification).
+  headers     Json
+  /// Raw request body (svix-verified payload).
+  body        String
+  durationMs  Int
+  receivedAt  DateTime        @default(now())
+
+  @@index([receivedAt])
+  @@index([provider, receivedAt])
+}
+
+/// Per-hotel email template overrides. Cron looks up the template for a kind
+/// (e.g. `checkin_reminder`) and substitutes `{{variables}}` before sending.
+/// When no row exists for a (hotelId, kind) pair, cron falls back to the
+/// hard-coded default in `src/lib/email-templates.ts`.
+enum EmailTemplateKind {
+  checkin_reminder
+  review_request
+  payment_failed
+}
+
+model EmailTemplate {
+  id        String            @id @default(cuid())
+  hotelId   String
+  hotel     Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  kind      EmailTemplateKind
+  /// Subject line. May contain `{{variables}}`.
+  subject   String
+  /// Plain-text body. May contain `{{variables}}`.
+  body      String
+  enabled   Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@unique([hotelId, kind])
+}
+
+/// One row per `processAutomations` tick. Lets the /automations page show a
+/// 24h timeline of cron activity (reminders sent, no-shows cancelled, review
+/// requests, warning digests). Cross-tenant: a single tick handles all hotels,
+/// so this table has no `hotelId`. Per-hotel breakdown lives in `byHotel`.
+model AutomationLog {
+  id                  String   @id @default(cuid())
+  ranAt               DateTime @default(now())
+  /// Total ms the tick took (server time).
+  durationMs          Int
+  remindersSent       Int      @default(0)
+  noShowsCancelled    Int      @default(0)
+  reviewRequestsSent  Int      @default(0)
+  warningsDigested    Int      @default(0)
+  /// Email sends fired this tick (real + mock).
+  emailsSent          Int      @default(0)
+  /// Per-hotel counts: `{ "hotelId": { reminders, noShows, reviews, warnings } }`.
+  byHotel             Json
+  /// Newline-joined error messages from the tick (empty = clean run).
+  errors              String?
+
+  @@index([ranAt])
+}

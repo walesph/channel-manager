@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Guest" ADD COLUMN "notes" TEXT;
+ALTER TABLE "Guest" ADD COLUMN "tags" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
