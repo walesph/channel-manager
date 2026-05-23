@@ -1,4 +1,6 @@
 import { getGuestCrm, type GuestCrmFilter } from "@/lib/queries";
+import { withTenant } from "@/lib/db";
+import { currentHotelId } from "@/lib/tenant";
 import { GuestsClient } from "./GuestsClient";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +29,7 @@ export default async function GuestsPage({
     minLtv: parseInt0(sp.minLtv),
     hasUpcoming: sp.upcoming === "1",
   };
-  const data = await getGuestCrm(filter, 200);
+  const data = await withTenant(await currentHotelId(), () => getGuestCrm(filter, 200));
   return (
     <GuestsClient
       data={data}

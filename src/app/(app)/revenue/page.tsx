@@ -1,4 +1,6 @@
 import { getRevenueData, type RevenueRange } from "@/lib/queries";
+import { withTenant } from "@/lib/db";
+import { currentHotelId } from "@/lib/tenant";
 import { RevenueClient } from "./RevenueClient";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +14,6 @@ export default async function RevenuePage({
 }) {
   const sp = await searchParams;
   const range: RevenueRange = RANGES.has(sp.range as RevenueRange) ? (sp.range as RevenueRange) : "6M";
-  const data = await getRevenueData(range);
+  const data = await withTenant(await currentHotelId(), () => getRevenueData(range));
   return <RevenueClient data={data} range={range} />;
 }
