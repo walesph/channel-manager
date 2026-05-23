@@ -49,21 +49,34 @@ jobs:
       - name: Apply migrations
         run: npx prisma migrate deploy
 
-      # The postgres Docker image creates POSTGRES_USER as a SUPERUSER, and
-      # superusers BYPASS row-level security even with FORCE enabled. Production
-      # connects as a non-superuser role, so drop the attribute here to mirror
-      # that — otherwise the RLS tenant-guard tests would silently no-op.
-      - name: Make app role non-superuser (so RLS applies, as in production)
-        run: echo "ALTER ROLE stayboard NOSUPERUSER;" | npx prisma db execute --stdin --schema prisma/schema.prisma
+      # The postgres image's POSTGRES_USER (stayboard) is the bootstrap
+      # SUPERUSER, and superusers BYPASS row-level security even with FORCE —
+      # its SUPERUSER attribute also can't be removed. Production connects as a
+      # non-superuser, so create a dedicated app role and run seed + tests as
+      # it; otherwise the RLS tenant-guard tests would silently no-op.
+      # Migrations stay as the owner (stayboard) so the tables are owned there.
+      - name: Create non-superuser app role for RLS
+        run: |
+          psql "$DATABASE_URL" <<'SQL'
+          DROP ROLE IF EXISTS app_rls;
+          CREATE ROLE app_rls LOGIN PASSWORD 'app_rls';
+          GRANT USAGE ON SCHEMA public TO app_rls;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_rls;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_rls;
+          SQL
 
       - name: Seed database
         run: npm run db:seed
+        env:
+          DATABASE_URL: postgresql://app_rls:app_rls@localhost:5432/stayboard_test
 
       - name: Lint + type-check (via build)
         run: npm run build
 
       - name: Run Vitest suite with coverage
         run: npm run test:coverage
+        env:
+          DATABASE_URL: postgresql://app_rls:app_rls@localhost:5432/stayboard_test
 
       - name: Upload JUnit results
         if: always()
