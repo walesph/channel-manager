@@ -1,9 +1,13 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { prisma } from "./db";
+// Tenant-scoped client: when an action has entered a tenant scope (via
+// sessionTenantId() or assertHotelOwnership()), each operation runs bound to
+// that hotel by Postgres RLS. Unscoped actions (kiosk, push-by-endpoint)
+// behave exactly like the global client.
+import { scopedPrisma as prisma, withTenantTx } from "./db";
 import { headers } from "next/headers";
-import { assertHotelOwnership, currentHotelId, hasActiveSession } from "./tenant";
+import { assertHotelOwnership, sessionTenantId, enterTenantScope, hasActiveSession } from "./tenant";
 import { getAutomationTickDetail, getRecentActivity, getWebhookLogDetail, searchCommands, type ActivityItem, type AutomationTickDetail, type CommandItem, type WebhookLogDetail } from "./queries";
 import { getStripe, stripeEnabled } from "./stripe";
 import {
@@ -410,7 +414,7 @@ export interface CreateBookingInput {
   total?: number;
   notes?: string;
   externalRef?: string;
-  /** Explicit hotel scope — used by webhooks to bypass session-based currentHotelId(). */
+  /** Explicit hotel scope — used by webhooks to bypass session-based sessionTenantId(). */
   hotelId?: string;
 }
 
@@ -443,7 +447,7 @@ export async function createBooking(input: CreateBookingInput): Promise<CreateBo
     // (e.g. the Booking.com webhook). A logged-in user may NOT target another
     // hotel by passing a foreign hotelId — this is a public "use server"
     // action, so its arguments are attacker-controllable.
-    const sessionHotelId = await currentHotelId();
+    const sessionHotelId = await sessionTenantId();
     let expectedHotelId = sessionHotelId;
     if (input.hotelId && input.hotelId !== sessionHotelId) {
       if (await hasActiveSession()) {
@@ -452,6 +456,9 @@ export async function createBooking(input: CreateBookingInput): Promise<CreateBo
       // No session → trusted ingestion path; honor the explicit hotelId.
       expectedHotelId = input.hotelId;
     }
+    // Bind the RLS scope to the authoritative hotel (overrides the session
+    // fallback entered by sessionTenantId() above on the webhook path).
+    enterTenantScope(expectedHotelId);
     if (roomType.hotelId !== expectedHotelId) {
       return { ok: false, error: "room type does not belong to this hotel" };
     }
@@ -1053,7 +1060,7 @@ export async function connectMiddleware(input: {
   apiKey?: string;
 }): Promise<ConnectMiddlewareResult | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const existing = await prisma.middleware.findFirst({
       where: { hotelId, type: input.type },
       select: { id: true },
@@ -1285,7 +1292,7 @@ export interface PresignUploadResult extends PresignResult {
 
 export async function startUpload(input: PresignUploadInput): Promise<PresignUploadResult | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const presigned = presignUpload({
       hotelId,
       filename: input.filename,
@@ -1317,7 +1324,7 @@ export interface CommitUploadResult {
 
 export async function commitUpload(input: CommitUploadInput): Promise<CommitUploadResult | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     if (input.sizeBytes <= 0 || input.sizeBytes > 5 * 1024 * 1024) {
       return { ok: false, error: "invalid sizeBytes" };
     }
@@ -1367,7 +1374,7 @@ export async function reorderRoomPhotos(roomTypeId: string, orderedIds: string[]
   try {
     if (!roomTypeId) return { ok: false, error: "roomTypeId required" };
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) return { ok: false, error: "orderedIds required" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     // Tenant + ownership guard: every photo must belong to the right hotel + roomType
     const photos = await prisma.uploadedFile.findMany({
       where: { id: { in: orderedIds }, hotelId, ownerRefId: roomTypeId, kind: "room_photo" },
@@ -1376,11 +1383,11 @@ export async function reorderRoomPhotos(roomTypeId: string, orderedIds: string[]
     if (photos.length !== orderedIds.length) {
       return { ok: false, error: "one or more photo ids not found for this room" };
     }
-    await prisma.$transaction(
-      orderedIds.map((id, idx) =>
-        prisma.uploadedFile.update({ where: { id }, data: { sortIndex: idx } }),
-      ),
-    );
+    await withTenantTx(hotelId, async (tx) => {
+      for (let idx = 0; idx < orderedIds.length; idx++) {
+        await tx.uploadedFile.update({ where: { id: orderedIds[idx] }, data: { sortIndex: idx } });
+      }
+    });
     safeRevalidate(["/rooms"]);
     return { ok: true };
   } catch (e) {
@@ -1390,7 +1397,7 @@ export async function reorderRoomPhotos(roomTypeId: string, orderedIds: string[]
 
 export async function clearHotelLogo(): Promise<{ ok: true } | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     await prisma.hotel.update({ where: { id: hotelId }, data: { logoUrl: null } });
     safeRevalidate(["/settings", "/"]);
     return { ok: true };
@@ -1431,7 +1438,7 @@ export async function upsertEmailTemplate(input: EmailTemplateUpsertInput): Prom
     if (!body) return { ok: false, error: "body required" };
     if (subject.length > 200) return { ok: false, error: "subject too long (max 200)" };
     if (body.length > 4000) return { ok: false, error: "body too long (max 4000)" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const row = await prisma.emailTemplate.upsert({
       where: { hotelId_kind: { hotelId, kind: input.kind } },
       create: { hotelId, kind: input.kind, subject, body, enabled: input.enabled },
@@ -1447,7 +1454,7 @@ export async function upsertEmailTemplate(input: EmailTemplateUpsertInput): Prom
 export async function resetEmailTemplate(kind: EmailTemplateKind): Promise<{ ok: true; kind: EmailTemplateKind } | BulkEditError> {
   try {
     if (!TEMPLATE_KINDS.has(kind)) return { ok: false, error: `unsupported kind: ${kind}` };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     await prisma.emailTemplate.deleteMany({ where: { hotelId, kind } });
     safeRevalidate(["/settings/email-templates"]);
     return { ok: true, kind };
@@ -1463,7 +1470,7 @@ export interface SavedReplyDeletedResult { ok: true; deletedId: string; }
 
 export async function createSavedReply(label: string, body: string): Promise<SavedReplyResult | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const l = label.trim();
     const b = body.trim();
     if (!l) return { ok: false, error: "label required" };
@@ -1541,9 +1548,9 @@ export async function importCsv(input: CsvImportInput): Promise<CsvImportSuccess
       return { ok: false, error: "csv, kind, and mapping are required" };
     }
     if (input.csv.length > 5 * 1024 * 1024) return { ok: false, error: "csv too large (max 5MB)" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     // Inject the resolved tenant id into mapping so the runImport stays
-    // pure (no implicit currentHotelId() inside the lib module).
+    // pure (no implicit sessionTenantId() inside the lib module).
     const mapping = { ...input.mapping, __hotelId: hotelId };
     const r = await runImport({ ...input, mapping });
     if (!r.ok) return { ok: false, error: r.error };
@@ -1577,7 +1584,7 @@ export async function subscribePush(input: PushSubscribeInput): Promise<PushSubs
       return { ok: false, error: "endpoint, p256dh, and auth are required" };
     }
     if (input.endpoint.length > 2000) return { ok: false, error: "endpoint too long" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const userKey = (input.userKey ?? "anon").slice(0, 80);
     // Upsert by endpoint (each device has its own endpoint URL)
     const row = await prisma.pushSubscription.upsert({
@@ -1723,12 +1730,12 @@ export async function hardDeleteGuestNow(guestId: string): Promise<{ ok: true; d
     // Cascade chains:
     //   Guest → Bookings (no cascade, manual) → BookingEvent/BookingRequest (cascade from Booking)
     //   Guest → Threads (no cascade, manual) → Message (cascade from Thread)
-    await prisma.$transaction([
-      prisma.message.deleteMany({ where: { thread: { guestId } } }),
-      prisma.thread.deleteMany({ where: { guestId } }),
-      prisma.booking.deleteMany({ where: { guestId } }),
-      prisma.guest.delete({ where: { id: guestId } }),
-    ]);
+    await withTenantTx(g.hotelId, async (tx) => {
+      await tx.message.deleteMany({ where: { thread: { guestId } } });
+      await tx.thread.deleteMany({ where: { guestId } });
+      await tx.booking.deleteMany({ where: { guestId } });
+      await tx.guest.delete({ where: { id: guestId } });
+    });
     safeRevalidate(["/settings/privacy", "/bookings", "/", "/messages"]);
     return { ok: true, deletedId: guestId };
   } catch (e) {
@@ -2029,7 +2036,7 @@ export async function createSavedFilter(input: CreateSavedFilterInput): Promise<
     );
     if (Object.keys(params).length === 0) return { ok: false, error: "filter has no params" };
     if (Object.keys(params).length > 10) return { ok: false, error: "too many params (max 10)" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const row = await prisma.savedFilter.create({
       data: {
         hotelId,
@@ -2117,7 +2124,7 @@ export async function createOutboundIntegration(input: CreateIntegrationInput): 
     if (urlErr) return { ok: false, error: urlErr };
     const events = input.events.filter((e) => ALLOWED_INTEGRATION_EVENTS.has(e));
     if (events.length === 0) return { ok: false, error: "at least one event required" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const row = await prisma.outboundIntegration.create({
       data: { hotelId, provider: input.provider, label, webhookUrl: input.webhookUrl, events, enabled: true },
     });
@@ -2187,7 +2194,7 @@ export async function createFirstRoomType(input: CreateFirstRoomTypeInput): Prom
     if (name.length > 80) return { ok: false, error: "name too long" };
     if (input.baseRate <= 0 || !Number.isFinite(input.baseRate)) return { ok: false, error: "baseRate must be positive" };
     if (input.capacity <= 0 || input.capacity > 20) return { ok: false, error: "capacity 1-20" };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const rt = await prisma.roomType.create({
       data: { hotelId, name, baseRate: input.baseRate, capacity: input.capacity },
     });
@@ -2214,7 +2221,7 @@ export interface ConnectFirstChannelInput {
 
 export async function connectFirstChannel(input: ConnectFirstChannelInput): Promise<{ ok: true; channelId: string } | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     // Idempotent: same (hotelId, type) pair won't be created twice (DB unique).
     const existing = await prisma.channel.findFirst({ where: { hotelId, type: input.type } });
     if (existing) return { ok: true, channelId: existing.id };
@@ -2230,7 +2237,7 @@ export async function connectFirstChannel(input: ConnectFirstChannelInput): Prom
 
 export async function completeOnboarding(): Promise<{ ok: true } | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     await prisma.hotel.update({
       where: { id: hotelId },
       data: { onboardingCompletedAt: new Date() },
@@ -2321,7 +2328,7 @@ export async function startSubscriptionCheckout(plan: SubscriptionPlan): Promise
   try {
     const planDef = planById(plan);
     if (!planDef) return { ok: false, error: `unknown plan: ${plan}` };
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const hotel = await prisma.hotel.findUniqueOrThrow({ where: { id: hotelId } });
 
     if (!stripeEnabled || !planDef.stripePriceId) {
@@ -2376,7 +2383,7 @@ export interface BillingPortalResult { ok: true; url: string; mock: boolean; }
 
 export async function openBillingPortal(): Promise<BillingPortalResult | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const hotel = await prisma.hotel.findUniqueOrThrow({ where: { id: hotelId } });
     if (!stripeEnabled || !hotel.stripeCustomerId) {
       return { ok: true, url: "/settings/billing?mock=portal", mock: true };
@@ -2397,7 +2404,7 @@ export async function openBillingPortal(): Promise<BillingPortalResult | BulkEdi
 
 /** Re-export thin wrappers for the billing settings page (server-side reads only — no auth needed). */
 export async function fetchBillingState(): Promise<SubscriptionState> {
-  const hotelId = await currentHotelId();
+  const hotelId = await sessionTenantId();
   return getSubscriptionState(hotelId);
 }
 
@@ -2416,7 +2423,7 @@ export interface OwnerICalToken {
 
 export async function getOrCreateOwnerICalToken(): Promise<OwnerICalToken | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     let hotel = await prisma.hotel.findUniqueOrThrow({ where: { id: hotelId } });
     if (!hotel.ownerICalToken) {
       const tok = randomBytes(24).toString("base64url");
@@ -2437,7 +2444,7 @@ export async function getOrCreateOwnerICalToken(): Promise<OwnerICalToken | Bulk
 
 export async function rotateOwnerICalToken(): Promise<OwnerICalToken | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const tok = randomBytes(24).toString("base64url");
     const hotel = await prisma.hotel.update({
       where: { id: hotelId },
@@ -2452,7 +2459,7 @@ export async function rotateOwnerICalToken(): Promise<OwnerICalToken | BulkEditE
 
 export async function revokeOwnerICalToken(): Promise<{ ok: true } | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     await prisma.hotel.update({ where: { id: hotelId }, data: { ownerICalToken: null } });
     safeRevalidate(["/settings"]);
     return { ok: true };
@@ -2484,7 +2491,7 @@ export async function updateHotelInfo(
   input: UpdateHotelInfoInput,
 ): Promise<UpdateHotelInfoResult | BulkEditError> {
   try {
-    const hotelId = await currentHotelId();
+    const hotelId = await sessionTenantId();
     const data: { name?: string; timezone?: string; currency?: string } = {};
     if (typeof input.name === "string") {
       const trimmed = input.name.trim();

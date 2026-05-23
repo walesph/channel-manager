@@ -1,5 +1,6 @@
 import "server-only";
 import { prisma } from "./db";
+import { tenantHotelStore } from "./tenant-scope";
 
 let cachedFallbackHotelId: string | null = null;
 
@@ -91,12 +92,41 @@ export async function hasActiveSession(): Promise<boolean> {
 }
 
 /**
+ * Resolves the current tenant's hotel id AND enters the RLS scope for the rest
+ * of this async execution context (via `tenantHotelStore.enterWith`). After
+ * this call, every `scopedPrisma` operation in the same context is bound to
+ * this hotel by the row-level-security policies.
+ *
+ * Use this at the top of session-originated server actions. Reads in server
+ * components establish the scope with `withTenant(...)` instead; trusted
+ * server-to-server callers (webhooks, cron) never call it, so they stay
+ * unscoped (policies permissive).
+ */
+export async function sessionTenantId(): Promise<string> {
+  const id = await currentHotelId();
+  tenantHotelStore.enterWith(id);
+  return id;
+}
+
+/**
+ * Enters the RLS scope for an explicit hotel id. Use when the tenant is known
+ * but not from the session — e.g. the Booking.com webhook ingesting into the
+ * hotel named in its (secret-authenticated) payload.
+ */
+export function enterTenantScope(hotelId: string): void {
+  tenantHotelStore.enterWith(hotelId);
+}
+
+/**
  * Throws if the provided resource hotelId does not match the current tenant.
- * Use inside mutation actions after fetching the resource.
+ * Use inside mutation actions after fetching the resource. On success it also
+ * enters the RLS scope for this tenant, so subsequent `scopedPrisma` mutations
+ * in the action are bound to it.
  */
 export async function assertHotelOwnership(resourceHotelId: string | null | undefined): Promise<void> {
   const expected = await currentHotelId();
   if (resourceHotelId !== expected) {
     throw new Error(`forbidden: resource belongs to a different hotel`);
   }
+  tenantHotelStore.enterWith(expected);
 }

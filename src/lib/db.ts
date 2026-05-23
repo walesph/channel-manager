@@ -86,6 +86,24 @@ export function withTenant<T>(hotelId: string, fn: () => Promise<T>): Promise<T>
 }
 
 /**
+ * Runs `fn` inside a single interactive transaction with the RLS tenant GUC
+ * bound to `hotelId`, passing the transaction client. Use this for mutations
+ * that must be atomic across several statements (the cases that previously used
+ * `prisma.$transaction([...])`): all `tx` operations are both atomic AND
+ * tenant-scoped. The GUC is set with `is_local = true`, scoped to this
+ * transaction only.
+ */
+export function withTenantTx<T>(
+  hotelId: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.current_hotel_id', ${hotelId}, true)`;
+    return fn(tx);
+  });
+}
+
+/**
  * A Prisma client that auto-scopes to the active tenant. When a hotel id is in
  * `tenantHotelStore` (i.e. inside `withTenant`), every model operation runs in
  * its own short transaction that first binds the RLS GUC, so the
