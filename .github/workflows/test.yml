@@ -49,6 +49,13 @@ jobs:
       - name: Apply migrations
         run: npx prisma migrate deploy
 
+      # The postgres Docker image creates POSTGRES_USER as a SUPERUSER, and
+      # superusers BYPASS row-level security even with FORCE enabled. Production
+      # connects as a non-superuser role, so drop the attribute here to mirror
+      # that — otherwise the RLS tenant-guard tests would silently no-op.
+      - name: Make app role non-superuser (so RLS applies, as in production)
+        run: echo "ALTER ROLE stayboard NOSUPERUSER;" | npx prisma db execute --stdin --schema prisma/schema.prisma
+
       - name: Seed database
         run: npm run db:seed
 
