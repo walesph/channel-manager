@@ -12,7 +12,11 @@ import type {
   MiddlewareStatus,
   MiddlewareType,
 } from "@prisma/client";
-import { prisma } from "./db";
+// Routed through the tenant-scoped proxy: when a server request runs inside
+// `withTenant(...)`, every query here is bound to that hotel by Postgres RLS.
+// Outside a scope it falls back to the global client, so unwrapped callers
+// (admin cross-tenant views, scripts) are unaffected.
+import { scopedPrisma as prisma } from "./db";
 import { currentHotelId } from "./tenant";
 import { competitorAvgRate, eventFor, eventsInRange, type EventCategory } from "./market";
 import type { ChannelId } from "./i18n";

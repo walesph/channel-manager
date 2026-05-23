@@ -1,4 +1,6 @@
 import { getBookingsPage, getRoomConflicts, getRoomTypeOptions, type BookingFilter } from "@/lib/queries";
+import { withTenant } from "@/lib/db";
+import { currentHotelId } from "@/lib/tenant";
 import { BookingsClient } from "./BookingsClient";
 import { BookingStatus } from "@prisma/client";
 import type { ChannelId } from "@/lib/i18n";
@@ -44,11 +46,16 @@ export default async function BookingsPage({
     endDate: parseDate(sp.to),
   };
   const page = parsePage(sp.page);
-  const [bookingsPage, roomTypeOptions, conflicts] = await Promise.all([
-    getBookingsPage(page, PAGE_SIZE, filter),
-    getRoomTypeOptions(),
-    getRoomConflicts(),
-  ]);
+  // Establish the RLS tenant scope for this request: every query below runs
+  // bound to the caller's hotel by the row-level-security policies.
+  const hotelId = await currentHotelId();
+  const [bookingsPage, roomTypeOptions, conflicts] = await withTenant(hotelId, () =>
+    Promise.all([
+      getBookingsPage(page, PAGE_SIZE, filter),
+      getRoomTypeOptions(),
+      getRoomConflicts(),
+    ]),
+  );
   return (
     <BookingsClient
       bookings={bookingsPage.rows}

@@ -1,4 +1,6 @@
 import { getCalendarGrid } from "@/lib/queries";
+import { withTenant } from "@/lib/db";
+import { currentHotelId } from "@/lib/tenant";
 import { CalendarClient } from "./CalendarClient";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +17,7 @@ export default async function CalendarPage({
   const requested = parseInt(sp.range ?? "14", 10);
   const days = ALLOWED_RANGES.has(requested) ? requested : 14;
   const startIso = sp.start && ISO_RE.test(sp.start) ? sp.start : undefined;
-  const grid = await getCalendarGrid(days, startIso);
+  const hotelId = await currentHotelId();
+  const grid = await withTenant(hotelId, () => getCalendarGrid(days, startIso));
   return <CalendarClient grid={grid} />;
 }

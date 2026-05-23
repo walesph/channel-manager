@@ -16,7 +16,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { withTenant } from "../src/lib/db";
+import { withTenant, scopedPrisma } from "../src/lib/db";
 
 const prisma = new PrismaClient();
 
@@ -83,32 +83,45 @@ describe("baseline: no tenant context is permissive", () => {
 
 describe("withTenant() enforces isolation on UNSCOPED queries", () => {
   it("an unscoped findMany only returns the bound tenant's bookings", async () => {
-    const rows = await withTenant(hotelBId, (tx) => tx.booking.findMany({}));
+    const rows = await withTenant(hotelBId, () => scopedPrisma.booking.findMany({}));
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.hotelId === hotelBId)).toBe(true);
     expect(rows.some((r) => r.id === bookingBId)).toBe(true);
   });
 
   it("bound to Hotel A, Hotel B's bookings are entirely absent from an unscoped query", async () => {
-    const rows = await withTenant(hotelAId, (tx) => tx.booking.findMany({}));
+    const rows = await withTenant(hotelAId, () => scopedPrisma.booking.findMany({}));
     expect(rows.every((r) => r.hotelId === hotelAId)).toBe(true);
     expect(rows.some((r) => r.id === bookingBId)).toBe(false);
   });
 
   it("a foreign tenant's row is invisible even when fetched by primary key", async () => {
-    const leaked = await withTenant(hotelAId, (tx) => tx.booking.findUnique({ where: { id: bookingBId } }));
+    const leaked = await withTenant(hotelAId, () => scopedPrisma.booking.findUnique({ where: { id: bookingBId } }));
     expect(leaked).toBeNull();
   });
 
+  it("concurrent reads in the same scope each get their own connection (Promise.all)", async () => {
+    const [bookings, events] = await withTenant(hotelBId, () =>
+      Promise.all([
+        scopedPrisma.booking.findMany({}),
+        scopedPrisma.bookingEvent.findMany({ include: { booking: true } }),
+      ]),
+    );
+    expect(bookings.length).toBeGreaterThan(0);
+    expect(events.length).toBeGreaterThan(0);
+    expect(bookings.every((r) => r.hotelId === hotelBId)).toBe(true);
+    expect(events.every((e) => e.booking.hotelId === hotelBId)).toBe(true);
+  });
+
   it("transitive table (BookingEvent) is restricted to the bound tenant", async () => {
-    const evScopedToB = await withTenant(hotelBId, (tx) =>
-      tx.bookingEvent.findMany({ include: { booking: true } }),
+    const evScopedToB = await withTenant(hotelBId, () =>
+      scopedPrisma.bookingEvent.findMany({ include: { booking: true } }),
     );
     expect(evScopedToB.length).toBeGreaterThan(0);
     expect(evScopedToB.every((e) => e.booking.hotelId === hotelBId)).toBe(true);
 
-    const evScopedToA = await withTenant(hotelAId, (tx) =>
-      tx.bookingEvent.findMany({ where: { bookingId: bookingBId } }),
+    const evScopedToA = await withTenant(hotelAId, () =>
+      scopedPrisma.bookingEvent.findMany({ where: { bookingId: bookingBId } }),
     );
     expect(evScopedToA).toEqual([]);
   });

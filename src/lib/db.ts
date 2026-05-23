@@ -1,4 +1,5 @@
 import { PrismaClient, Prisma } from "@prisma/client";
+import { tenantHotelStore } from "./tenant-scope";
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
@@ -72,15 +73,65 @@ if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
  * keep using the global `prisma` client with NO tenant context, where the
  * policies are permissive.
  *
- * The GUC is set with `is_local = true`, so it is scoped to this transaction
- * and never leaks onto the pooled connection afterwards.
+ * The GUC is set with `is_local = true`, so it is scoped to each operation's
+ * transaction and never leaks onto the pooled connection afterwards.
+ *
+ * Establishes the scope via AsyncLocalStorage and runs `fn`. It does NOT open a
+ * single shared transaction, so concurrent reads inside `fn` (e.g. via
+ * `Promise.all`) each get their own connection. Re-entrant by nature: nested
+ * `withTenant` calls just re-set the same id in the store.
  */
-export async function withTenant<T>(
-  hotelId: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT set_config('app.current_hotel_id', ${hotelId}, true)`;
-    return fn(tx);
-  });
+export function withTenant<T>(hotelId: string, fn: () => Promise<T>): Promise<T> {
+  return tenantHotelStore.run(hotelId, fn);
 }
+
+/**
+ * A Prisma client that auto-scopes to the active tenant. When a hotel id is in
+ * `tenantHotelStore` (i.e. inside `withTenant`), every model operation runs in
+ * its own short transaction that first binds the RLS GUC, so the
+ * row-level-security policies restrict it to that hotel — a defense-in-depth
+ * net beneath the app's explicit `where: { hotelId }` filters. Outside a scope
+ * it behaves exactly like the global client (RLS policies are permissive with
+ * no GUC set).
+ *
+ * The tenant id is read in the Proxy's *synchronous* property getter — i.e. at
+ * the call site, while still inside `withTenant`'s `run()` — NOT inside a
+ * Prisma `$extends` callback, which the engine invokes on a later async tick
+ * where AsyncLocalStorage context is not reliably propagated.
+ *
+ * Each operation is its own transaction (rather than one shared interactive
+ * transaction per request), so concurrent `Promise.all([...])` reads each get
+ * their own connection instead of being multiplexed onto one.
+ *
+ * Import this in place of `prisma` from modules whose queries are
+ * session-scoped (e.g. queries.ts). Trusted server-to-server paths (webhooks,
+ * cron, provisioning, seed) keep using the global `prisma` with no context.
+ */
+export const scopedPrisma: PrismaClient = new Proxy(prisma, {
+  get(base, prop, receiver) {
+    const value = Reflect.get(base, prop, receiver);
+    const hotelId = tenantHotelStore.getStore();
+    // No active scope, symbol keys, or top-level methods ($queryRaw, $connect…):
+    // pass straight through to the global client.
+    if (!hotelId || typeof prop !== "string" || typeof value !== "object" || value === null) {
+      return typeof value === "function" ? value.bind(base) : value;
+    }
+    // `value` is a model delegate (e.g. prisma.booking). Wrap each of its
+    // operations so the call runs in a GUC-bound transaction for `hotelId`.
+    const modelKey = prop;
+    return new Proxy(value as object, {
+      get(delegate, opProp) {
+        const opVal = Reflect.get(delegate, opProp);
+        if (typeof opVal !== "function" || typeof opProp !== "string") return opVal;
+        return (args: unknown) =>
+          prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT set_config('app.current_hotel_id', ${hotelId}, true)`;
+            const txDelegate = (tx as unknown as Record<string, Record<string, (a: unknown) => Promise<unknown>>>)[
+              modelKey
+            ];
+            return txDelegate[opProp](args);
+          });
+      },
+    });
+  },
+});
