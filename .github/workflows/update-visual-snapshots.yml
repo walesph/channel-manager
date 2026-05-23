@@ -1,0 +1,70 @@
+name: update-visual-snapshots
+
+# Manually-triggered: regenerates the Playwright baseline screenshots on Linux
+# (the platform CI runs on — macOS-generated baselines won't match) and commits
+# them back to the branch. Run this once to seed the baselines, then again
+# whenever an intentional UI change should update them.
+#
+# Trigger from the Actions tab, or: gh workflow run update-visual-snapshots.yml
+on:
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: stayboard
+          POSTGRES_PASSWORD: stayboard
+          POSTGRES_DB: stayboard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://stayboard:stayboard@localhost:5432/stayboard_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate Prisma client + migrate + seed
+        run: |
+          npx prisma generate
+          npx prisma migrate deploy
+          npm run db:seed
+
+      - name: Regenerate baseline screenshots
+        run: npx playwright test --update-snapshots
+
+      - name: Commit updated baselines
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A e2e
+          if git diff --cached --quiet; then
+            echo "No snapshot changes to commit."
+          else
+            git commit -m "ci: add/update Playwright visual baselines (linux)"
+            git push
+          fi
