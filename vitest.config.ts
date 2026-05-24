@@ -6,10 +6,15 @@ export default defineConfig({
     // existing `scripts/check-*.ts` smoke scripts have been re-homed there
     // and broken into focused suites.
     include: ["tests/**/*.test.ts"],
-    // DB tests are sequential by design — they share the seed and create
-    // ephemeral rows. Parallelism would race on hotel IDs.
+    // DB tests are sequential by design — they share one database and create
+    // ephemeral rows. `singleFork` keeps them in one process, but on its own
+    // vitest still interleaves files asynchronously, which races: e.g. one
+    // file's afterAll deletes a booking while another file's automations tick
+    // is mid-iteration over it (FK violation). `fileParallelism: false` forces
+    // one-file-at-a-time execution, removing that whole class of flakiness.
     pool: "forks",
     forks: { singleFork: true },
+    fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
     // No globals — each test imports `{ describe, it, expect }` explicitly.

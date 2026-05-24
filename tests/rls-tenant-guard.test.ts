@@ -48,8 +48,11 @@ beforeAll(async () => {
       externalRef: "RLS-B-001",
       status: "confirmed",
       payment: "paid",
-      checkIn: new Date(Date.now() + 86_400_000),
-      checkOut: new Date(Date.now() + 3 * 86_400_000),
+      // Far future, on purpose: keep this ephemeral booking out of the
+      // automations check-in-reminder window (~24h ahead) so a concurrent
+      // tick never picks it up and races with this file's afterAll cleanup.
+      checkIn: new Date(Date.now() + 30 * 86_400_000),
+      checkOut: new Date(Date.now() + 33 * 86_400_000),
       total: 200000,
     },
   });
