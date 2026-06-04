@@ -119,6 +119,11 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://stayboard:stayboard@localhost:5432/stayboard_test
+      # Freeze the app clock so the date-anchored seed and the date-windowed
+      # pages render identically every run — required for stable visual
+      # baselines. MUST match the value in update-visual-snapshots.yml. Both the
+      # seed step and the playwright-spawned `next dev` inherit this.
+      STAYBOARD_NOW: "2026-06-15T12:00:00.000Z"
 
     steps:
       - uses: actions/checkout@v4

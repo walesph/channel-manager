@@ -32,8 +32,9 @@ export default defineConfig({
       include: ["src/lib/**/*.ts"],
       exclude: [
         "src/lib/**/*.d.ts",
-        // Pure-config modules — measuring 100% gives no signal.
+        // Pure-config / infra modules — measuring gives no signal.
         "src/lib/db.ts",
+        "src/lib/clock.ts",
         "src/lib/i18n.ts",
         "src/lib/room-palette.ts",
       ],

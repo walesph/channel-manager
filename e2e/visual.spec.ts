@@ -48,13 +48,9 @@ test.describe("visual regression — key routes", () => {
     });
   });
 
-  // Skipped: the revenue page is a large time-series chart over a window that
-  // ends "today", so its bars/axis re-bucket every day — a baseline drifts
-  // ~11% within 24h, far above the 0.5% tolerance, and the change isn't
-  // maskable (it's the SVG chart itself, not timestamp text). Re-enabling this
-  // would require freezing the app's clock for visual tests (deterministic
-  // "now" + date-anchored seed). The other four routes give stable coverage.
-  test.skip("revenue /revenue?range=6M", async ({ page }) => {
+  // Deterministic again: with STAYBOARD_NOW frozen in CI and the seed anchored
+  // to it, the time-series chart renders identically every run.
+  test("revenue /revenue?range=6M", async ({ page }) => {
     await page.goto("/revenue?range=6M");
     await page.waitForLoadState("networkidle");
     await maskTimeSensitive(page);

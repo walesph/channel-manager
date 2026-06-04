@@ -17,6 +17,7 @@ import type {
 // Outside a scope it falls back to the global client, so unwrapped callers
 // (admin cross-tenant views, scripts) are unaffected.
 import { scopedPrisma as prisma } from "./db";
+import { now as clockNow, nowMs } from "./clock";
 import { currentHotelId } from "./tenant";
 import { competitorAvgRate, eventFor, eventsInRange, type EventCategory } from "./market";
 import type { ChannelId } from "./i18n";
@@ -52,7 +53,7 @@ function asChannelId(t: ChannelType | string | null | undefined): ChannelId {
 }
 
 function startOfTodayUtc(): Date {
-  const now = new Date();
+  const now = clockNow();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
@@ -220,7 +221,7 @@ function computeBookingWarnings(b: {
   createdAt: Date;
 }): BookingWarning[] {
   const out: BookingWarning[] = [];
-  const now = new Date();
+  const now = clockNow();
   if (b.payment === "failed") {
     out.push({
       kind: "payment_failed",
@@ -1082,7 +1083,7 @@ export async function getDeletionQueue(): Promise<GuestDeletionQueueRow[]> {
     select: { id: true, name: true, email: true, deletionRequestedAt: true },
     orderBy: { deletionRequestedAt: "asc" },
   });
-  const now = Date.now();
+  const now = nowMs();
   return rows.map((r) => {
     const reqMs = r.deletionRequestedAt!.getTime();
     const hardMs = reqMs + GDPR_GRACE_DAYS * 86_400_000;
@@ -1161,7 +1162,7 @@ export async function exportGuestData(guestId: string): Promise<GuestDataExport 
   });
   if (!guest) return null;
   return {
-    meta: { exportedAt: new Date().toISOString(), hotelId, schemaVersion: 1 },
+    meta: { exportedAt: clockNow().toISOString(), hotelId, schemaVersion: 1 },
     guest: {
       id: guest.id,
       name: guest.name,
@@ -1461,7 +1462,7 @@ export interface HotelSummaryRow {
  */
 export async function getHotelsSummary(): Promise<HotelSummaryRow[]> {
   const currentId = await currentHotelId();
-  const since = new Date(Date.now() - 30 * 86_400_000);
+  const since = new Date(nowMs() - 30 * 86_400_000);
 
   const [hotels, bookingAggregates, roomCounts, channelCounts] = await Promise.all([
     prisma.hotel.findMany({ orderBy: { createdAt: "asc" } }),
@@ -1587,7 +1588,7 @@ export interface BookingWarningSummaryItem {
 export async function getBookingWarningSummary(limit = 4): Promise<BookingWarningSummaryItem[]> {
   const hotelId = await currentHotelId();
   // Scan upcoming + recent bookings (anything that could still need attention)
-  const cutoff = new Date(Date.now() - 7 * 86_400_000);
+  const cutoff = new Date(nowMs() - 7 * 86_400_000);
   const rows = await prisma.booking.findMany({
     where: { hotelId, OR: [{ checkIn: { gte: cutoff } }, { status: "in_house" }] },
     select: {
@@ -1773,7 +1774,7 @@ export interface ChannelMixRow {
 
 export async function getChannelMix(): Promise<ChannelMixRow[]> {
   const hotelId = await currentHotelId();
-  const now = new Date();
+  const now = clockNow();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
   const rows = await prisma.booking.findMany({
@@ -2173,7 +2174,7 @@ const SYNC_OP_LABEL_KO: Record<SyncOp, string> = {
 
 export async function getRecentActivity(limit = 20): Promise<ActivityItem[]> {
   const hotelId = await currentHotelId();
-  const now = new Date();
+  const now = clockNow();
   const recencyCutoff = new Date(now.getTime() - 60 * 60_000);
 
   const [events, logs, messages] = await Promise.all([
@@ -2317,7 +2318,7 @@ export async function getMessageThreads(): Promise<ThreadRow[]> {
     }
   }
 
-  const now = Date.now();
+  const now = nowMs();
   return threads.map((t) => {
     const lastMsg = t.messages.filter((m) => m.sender !== "system").at(-1);
     const ctx = bookingsByPair.get(`${t.guestId}:${t.channelId ?? ""}`);
@@ -2447,7 +2448,7 @@ export async function getGuestCrm(filter: GuestCrmFilter = {}, limit = 200): Pro
     orderBy: { name: "asc" },
   });
 
-  const now = Date.now();
+  const now = nowMs();
   const rows: GuestCrmRow[] = [];
   for (const g of guests) {
     const ltv = g.bookings.reduce((s, b) => s + b.total, 0);
@@ -2618,7 +2619,7 @@ export async function getGuestProfile(guestId: string): Promise<GuestProfile | n
   tl.sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : -1));
 
   // ── Upcoming (next 5 future check-ins) ─────────────────────────────
-  const todayMs = Date.now();
+  const todayMs = nowMs();
   const upcoming = active
     .filter((b) => b.checkIn.getTime() >= todayMs)
     .slice(0, 5)
@@ -3011,7 +3012,7 @@ export interface PerfOverview {
 }
 
 export async function getPerfOverview(): Promise<PerfOverview> {
-  const since = new Date(Date.now() - 24 * 3600_000);
+  const since = new Date(nowMs() - 24 * 3600_000);
   const [recent, topSlowest24h, last24h] = await Promise.all([
     prisma.slowQueryLog.findMany({ orderBy: { occurredAt: "desc" }, take: 50 }),
     prisma.slowQueryLog.findMany({
@@ -3026,9 +3027,9 @@ export async function getPerfOverview(): Promise<PerfOverview> {
   ]);
 
   const hourlyBuckets = Array.from({ length: 24 }, () => 0);
-  const nowMs = Date.now();
+  const nowMsVal = nowMs();
   for (const r of last24h) {
-    const ageMs = nowMs - r.occurredAt.getTime();
+    const ageMs = nowMsVal - r.occurredAt.getTime();
     const idx = 23 - Math.floor(ageMs / 3600_000);
     if (idx >= 0 && idx < 24) hourlyBuckets[idx]++;
   }
@@ -3299,7 +3300,7 @@ export async function buildTaxReport(yearMonth: string): Promise<TaxReport | nul
       net: rows.reduce((s, r) => s + r.net, 0),
       byChannel,
     },
-    generatedAt: new Date().toISOString(),
+    generatedAt: clockNow().toISOString(),
   };
 }
 
@@ -3655,7 +3656,7 @@ export interface AutomationTickDetail {
 
 export async function getAutomationOverview(limit = 50): Promise<AutomationOverview> {
   const hotelId = await currentHotelId();
-  const since = new Date(Date.now() - 24 * 3600_000);
+  const since = new Date(nowMs() - 24 * 3600_000);
   const rows = await prisma.automationLog.findMany({
     orderBy: { ranAt: "desc" },
     take: limit,
@@ -3701,9 +3702,9 @@ export async function getAutomationOverview(limit = 50): Promise<AutomationOverv
 
   // Hourly activity buckets — last 24h, oldest first
   const hourlyActivity = Array.from({ length: 24 }, () => 0);
-  const nowMs = Date.now();
+  const nowMsVal = nowMs();
   for (const t of ticks) {
-    const ageMs = nowMs - new Date(t.ranAt).getTime();
+    const ageMs = nowMsVal - new Date(t.ranAt).getTime();
     if (ageMs < 0 || ageMs >= 24 * 3600_000) continue;
     const hoursAgo = Math.floor(ageMs / 3600_000);
     const bucketIdx = 23 - hoursAgo; // oldest at index 0

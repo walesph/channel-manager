@@ -10,6 +10,7 @@ import {
   SyncResult,
   MessageSender,
 } from "@prisma/client";
+import { now as clockNow } from "../src/lib/clock";
 
 const prisma = new PrismaClient();
 
@@ -212,7 +213,9 @@ async function main() {
     ratePlansByRt.set(rt.id, created);
   }
 
-  const now = new Date();
+  // Anchored to the injectable clock so STAYBOARD_NOW makes the seed (and thus
+  // the rendered, date-windowed pages) deterministic for visual snapshots.
+  const now = clockNow();
   const channels = await Promise.all(
     CHANNELS.map((c) =>
       prisma.channel.create({

@@ -32,6 +32,9 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://stayboard:stayboard@localhost:5432/stayboard_test
+      # Freeze the app clock so regenerated baselines are reproducible. MUST
+      # match the value in test.yml's visual job.
+      STAYBOARD_NOW: "2026-06-15T12:00:00.000Z"
 
     steps:
       - uses: actions/checkout@v4

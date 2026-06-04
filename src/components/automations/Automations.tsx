@@ -152,7 +152,7 @@ export function Automations({ lang, overview }: Props) {
                   >
                     <td>
                       <div style={{ fontWeight: 500 }}>{fmtClock(tick.ranAt)}</div>
-                      <div className="text-muted" style={{ fontSize: 11 }}>{fmtRel(tick.ranAt, lang)}</div>
+                      <div className="text-muted" style={{ fontSize: 11 }} data-testid="ago">{fmtRel(tick.ranAt, lang)}</div>
                     </td>
                     <td className="r num">
                       <span style={{ fontWeight: 500 }}>{tick.myCounts.reminders}</span>
