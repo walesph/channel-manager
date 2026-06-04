@@ -19,8 +19,21 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PrismaClient, ChannelType } from "@prisma/client";
 import * as tenant from "../src/lib/tenant";
+import { tenantHotelStore } from "../src/lib/tenant-scope";
 
 const prisma = new PrismaClient();
+
+/**
+ * Run an action in its own fresh, unscoped async context — mirroring a single
+ * production request. sessionTenantId()/assertHotelOwnership() call
+ * AsyncLocalStorage.enterWith(), which persists the tenant scope on the current
+ * context; across vitest's sequential `it` callbacks that context can be
+ * shared, so without this isolation one test's scope leaks into the next and
+ * (under RLS) hides the other tenant's rows. `run(undefined, …)` gives each
+ * call a clean store and contains any enterWith() it performs.
+ */
+const asRequest = <T>(fn: () => Promise<T>): Promise<T> =>
+  tenantHotelStore.run(undefined as unknown as string, fn);
 
 let hotelAId: string;
 let hotelBId: string;
@@ -85,14 +98,16 @@ describe("createBooking tenant guard (#1)", () => {
     const spy = vi.spyOn(tenant, "hasActiveSession").mockResolvedValue(true);
     try {
       const { createBooking } = await import("../src/lib/actions");
-      const res = await createBooking({
-        guestName: "Attacker",
-        roomTypeId: roomTypeBId, // Hotel B's room
-        channelType: ChannelType.direct,
-        checkIn: "2026-09-01",
-        checkOut: "2026-09-03",
-        hotelId: hotelBId, // attacker targets the victim tenant
-      });
+      const res = await asRequest(() =>
+        createBooking({
+          guestName: "Attacker",
+          roomTypeId: roomTypeBId, // Hotel B's room
+          channelType: ChannelType.direct,
+          checkIn: "2026-09-01",
+          checkOut: "2026-09-03",
+          hotelId: hotelBId, // attacker targets the victim tenant
+        }),
+      );
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.error).toMatch(/forbidden/i);
     } finally {
@@ -109,16 +124,18 @@ describe("createBooking tenant guard (#1)", () => {
   it("honors an explicit hotelId when there is NO session (trusted webhook ingestion)", async () => {
     // hasActiveSession() is naturally false here (Clerk disabled) — no spy.
     const { createBooking } = await import("../src/lib/actions");
-    const res = await createBooking({
-      guestName: "Webhook Guest",
-      roomTypeId: roomTypeBId,
-      channelType: ChannelType.direct,
-      checkIn: "2026-09-10",
-      checkOut: "2026-09-12",
-      total: 180000,
-      externalRef: "SEC-INGEST-001",
-      hotelId: hotelBId,
-    });
+    const res = await asRequest(() =>
+      createBooking({
+        guestName: "Webhook Guest",
+        roomTypeId: roomTypeBId,
+        channelType: ChannelType.direct,
+        checkIn: "2026-09-10",
+        checkOut: "2026-09-12",
+        total: 180000,
+        externalRef: "SEC-INGEST-001",
+        hotelId: hotelBId,
+      }),
+    );
     expect(res.ok).toBe(true);
     if (res.ok) {
       const created = await prisma.booking.findUnique({ where: { id: res.bookingId } });
@@ -131,7 +148,7 @@ describe("mutation ownership guard", () => {
   it("setBookingStatus refuses to mutate another tenant's booking", async () => {
     // Session pinned to Hotel A; target Hotel B's booking.
     const { setBookingStatus } = await import("../src/lib/actions");
-    const res = await setBookingStatus(bookingBId, "cancel");
+    const res = await asRequest(() => setBookingStatus(bookingBId, "cancel"));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error).toMatch(/forbidden/i);
 
